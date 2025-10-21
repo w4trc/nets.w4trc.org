@@ -6,6 +6,8 @@ export interface Env {
   MAIL_FROM_NAME: string; // (not used by Resend; kept for compatibility)
   DISTRO?: string;        // comma-separated, static in wrangler.jsonc "vars"
   RESEND_API_KEY: string; // secret
+  TURNSTILE_SITE_KEY: string;   // public site key
+  TURNSTILE_SECRET_KEY: string; // private secret key
 }
 
 /* ---------- HTML shell + styles ---------- */
@@ -85,6 +87,26 @@ function authCookie() {
   return `net_auth=1; Max-Age=1800; Path=/; Secure; HttpOnly; SameSite=Lax`;
 }
 
+async function verifyTurnstile(request: Request, env: Env, token: string | null) {
+  if (!env.TURNSTILE_SECRET_KEY) return { success: true, skipped: true }; // fail-open if env not set (optional)
+  if (!token) return { success: false, code: "MISSING_TOKEN" };
+
+  const body = new URLSearchParams({
+    secret: env.TURNSTILE_SECRET_KEY,
+    response: token,
+    remoteip: request.headers.get("CF-Connecting-IP") ?? ""
+  });
+
+  const r = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+    method: "POST",
+    body
+  });
+
+  const data = await r.json<any>();
+  return data as { success: boolean; "error-codes"?: string[] };
+}
+
+
 /* ---------- Email via Resend ---------- */
 async function sendMail(env: Env, subject: string, htmlBody: string) {
   const toList = (env.DISTRO ?? '').split(',').map(s => s.trim()).filter(Boolean);
@@ -112,15 +134,18 @@ async function handleHome() {
   return redirect('https://w4trc.org/nets', 301);
 }
 
-async function handleSubmitGET() {
+async function handleSubmitGET(env?: Env) {
   const today = new Date().toISOString().slice(0,10);
   const body = `
     <div class="card">
       <h1>W4TRC Net Submission</h1>
       <p class="muted">Submit totals for the weekly net. Fields marked * are required. For any questions, please email netcontrol@w4trc.org</p>
 
+      <!-- Turnstile loader -->
+      <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+
       <form method="post" action="/submit" autocomplete="off">
-        <!-- Honeypot for spam bots -->
+        <!-- Honeypot for basic bots -->
         <input type="text" name="website" tabindex="-1" aria-hidden="true"
                style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden;" />
 
@@ -159,19 +184,23 @@ async function handleSubmitGET() {
           <textarea id="comments" name="comments" rows="6" placeholder="Anything notable about the net..."></textarea>
         </div>
 
+        <!-- Turnstile widget (Managed mode, dark fits your theme) -->
+        <div class="cf-turnstile" data-sitekey="${env?.TURNSTILE_SITE_KEY ?? ''}" data-theme="dark"></div>
+
         <button class="btn" type="submit">Save</button>
       </form>
-      <p class="muted" style="margin-top:10px;">After submission, totals become visible on <a href="/view">/view</a>. Detailed check-ins & comments remain passcode-protected on per-entry pages.</p>
+      <p class="muted" style="margin-top:10px;">After submission, totals are on <a href="/view">/view</a>. Full check-ins & comments remain passcode-protected on per-entry pages.</p>
     </div>
   `;
   return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
 }
 
 
+
 async function handleSubmitPOST(request: Request, env: Env) {
   const form = await request.formData();
 
-  // Honeypot check — if filled, likely a bot; pretend success but discard.
+  // Honeypot: if filled, pretend success and bail
   const website = textOrUndefined(form.get('website'));
   if (website) {
     const body = `
@@ -182,6 +211,16 @@ async function handleSubmitPOST(request: Request, env: Env) {
     return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
   }
 
+  // Turnstile verification
+  const token = (form.get("cf-turnstile-response") as string) ?? null;
+  const outcome = await verifyTurnstile(request, env, token);
+  if (!outcome.success) {
+    const msg = outcome["error-codes"]?.join(", ") || "Verification failed";
+    const body = `<div class="card err"><strong>Human check failed.</strong> ${escapeHtml(msg)}. Please try again.</div>`;
+    return new Response(HTML(body), { status: 403, headers: { 'content-type': 'text/html; charset=utf-8' } });
+  }
+
+  // --- existing field parsing & insert logic (unchanged) ---
   const net_date = textOrUndefined(form.get('net_date'));
   const net_control_callsign = textOrUndefined(form.get('net_control_callsign'));
   const net_control_name = textOrUndefined(form.get('net_control_name'));
@@ -201,7 +240,6 @@ async function handleSubmitPOST(request: Request, env: Env) {
 
   const result = await stmt.run();
 
-  // Email distro
   const subject = `W4TRC Net: ${net_date} — ${check_ins_count} check-ins (${net_control_callsign})`;
   const htmlBody = `
     <h2>W4TRC Net Report — ${net_date}</h2>
@@ -223,10 +261,9 @@ async function handleSubmitPOST(request: Request, env: Env) {
         ${result.success ? `&nbsp; <a class="btn btn-ghost" href="/net/${result.lastRowId}">View this entry (passcode required)</a>` : ``}
       </p>
     </div>`;
-  return new Response(HTML(body), {
-    headers: { 'content-type': 'text/html; charset=utf-8' } // NOTE: no auth cookie set
-  });
+  return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
 }
+
 
 
 async function handleView(env: Env) {
@@ -404,9 +441,10 @@ export default {
 
     if (pathname === "/" || pathname === "") return handleHome();
 
-    if (pathname === "/submit" && request.method === "GET") return handleSubmitGET();
+    if (pathname === "/submit" && request.method === "GET") return handleSubmitGET(env);
     if (pathname === "/submit" && request.method === "POST") return handleSubmitPOST(request, env);
 
+    
     if (pathname === "/view" && request.method === "GET") return handleView(env);
 
     // Per-net detail: /net/:id (GET to prompt/login or show; POST to authenticate)

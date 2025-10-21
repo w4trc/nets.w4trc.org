@@ -24,7 +24,8 @@
 	"vars": {
 		"DISTRO": "netcontrol@w4trc.org",
 		"MAIL_PROVIDER": "resend",
-    	"MAIL_FROM": "W4TRC Nets <no-reply@w4trc.org>" // use a domain you verified in Resend
+    	"MAIL_FROM": "W4TRC Nets <no-reply@w4trc.org>", // use a domain you verified in Resend
+		"TURNSTILE_SITE_KEY": "0x4AAAAAAB73shYt-jPMhXXB"
 	}
 	
 
