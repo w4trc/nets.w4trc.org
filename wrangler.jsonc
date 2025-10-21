@@ -5,7 +5,7 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "nets-w4trc-org",
-	"main": "src/index.ts",
+	"main": "src/worker.ts",
 	"compatibility_date": "2025-10-14",
 	"compatibility_flags": [
 		"global_fetch_strictly_public"
@@ -16,7 +16,22 @@
 	},
 	"observability": {
 		"enabled": true
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "w4trc_netlogs",
+			"database_id": "f24a2ef6-a6d7-4042-92fe-1649fb093dd0"
+		}
+	],
+	// Environment vars (non-secret)
+	"vars": {
+		"DISTRO": "n4jhc@w4trc.org",
+		"MAIL_PROVIDER": "resend",
+    	"MAIL_FROM": "W4TRC Nets <no-reply@w4trc.org>" // use a domain you verified in Resend
 	}
+	
+
 	/**
 	 * Smart Placement
 	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
