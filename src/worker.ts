@@ -117,7 +117,7 @@ async function handleSubmitGET() {
   const body = `
     <div class="card">
       <h1>W4TRC Net Submission</h1>
-      <p class="muted">Submit totals for the weekly net. Fields marked * are required.</p>
+      <p class="muted">Submit totals for the weekly net. Fields marked * are required. For any questions, please email netcontrol@w4trc.org</p>
 
       <form method="post" action="/submit">
         <div class="grid-2">
