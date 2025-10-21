@@ -1,12 +1,11 @@
 // src/worker.ts
 export interface Env {
   DB: D1Database;
-  ADMIN_PASSWORD: string; // secret
-  MAIL_FROM: string;      // secret
-  MAIL_FROM_NAME: string; // secret
+  ADMIN_PASSWORD: string; // secret (used for submit + detail view)
+  MAIL_FROM: string;      // e.g., "W4TRC Nets <no-reply@w4trc.org>"
+  MAIL_FROM_NAME: string; // (not used by Resend; kept for compatibility)
   DISTRO?: string;        // comma-separated, static in wrangler.jsonc "vars"
   RESEND_API_KEY: string; // secret
-
 }
 
 /* ---------- HTML shell + styles ---------- */
@@ -48,6 +47,7 @@ const HTML = (body: string) => `<!doctype html>
     display: inline-block; padding: 11px 16px; border-radius: 12px; border: 1px solid var(--accent-b);
     background: var(--accent); color: #fff; font-weight: 700; cursor: pointer; margin-top: 14px; text-decoration:none;
   }
+  .btn-ghost { background: transparent; border-color: var(--border); }
   table { width:100%; border-collapse: collapse; margin-top: 12px; }
   th, td { padding: 10px 8px; border-bottom: 1px solid var(--border); text-align:left; }
   th { color: var(--muted); }
@@ -55,6 +55,8 @@ const HTML = (body: string) => `<!doctype html>
   .err { background: var(--err); border:1px solid var(--errb); padding:10px 12px; border-radius: 10px; margin-bottom:12px; }
   a { color: #b0c4ff; }
   .spacer { height: 6px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
+  .row { display:flex; gap:10px; flex-wrap: wrap; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -74,7 +76,16 @@ function escapeHtml(s: string) {
 function requireAuth(formPassword: string | undefined, env: Env) {
   return formPassword && formPassword === env.ADMIN_PASSWORD;
 }
+function hasAuthCookie(request: Request) {
+  const cookie = request.headers.get("cookie") || "";
+  return /net_auth=1/.test(cookie);
+}
+function authCookie() {
+  // 30-minute session cookie for detail pages
+  return `net_auth=1; Max-Age=1800; Path=/; Secure; HttpOnly; SameSite=Lax`;
+}
 
+/* ---------- Email via Resend ---------- */
 async function sendMail(env: Env, subject: string, htmlBody: string) {
   const toList = (env.DISTRO ?? '').split(',').map(s => s.trim()).filter(Boolean);
   if (!toList.length) return { ok: true, skipped: true };
@@ -95,7 +106,6 @@ async function sendMail(env: Env, subject: string, htmlBody: string) {
 
   return { ok: r.ok, status: r.status, statusText: r.statusText };
 }
-
 
 /* ---------- Route handlers ---------- */
 async function handleHome() {
@@ -151,7 +161,7 @@ async function handleSubmitGET() {
 
         <button class="btn" type="submit">Save</button>
       </form>
-      <p class="muted" style="margin-top:10px;">After submission, totals become visible on <a href="/view">/view</a>. Comments remain private.</p>
+      <p class="muted" style="margin-top:10px;">After submission, totals become visible on <a href="/view">/view</a>.</p>
     </div>
   `;
   return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
@@ -183,9 +193,9 @@ async function handleSubmitPOST(request: Request, env: Env) {
      VALUES (?1, ?2, ?3, ?4, ?5, ?6)`
   ).bind(net_date, net_control_callsign, net_control_name, check_ins_count, check_ins_list, comments);
 
-  await stmt.run();
+  const result = await stmt.run();
 
-  // Email via static distro
+  // Email via static distro (includes comments since you left them in the email body)
   const subject = `W4TRC Net: ${net_date} — ${check_ins_count} check-ins (${net_control_callsign})`;
   const htmlBody = `
     <h2>W4TRC Net Report — ${net_date}</h2>
@@ -195,19 +205,21 @@ async function handleSubmitPOST(request: Request, env: Env) {
     <p><strong>Comments:</strong><br/><pre>${escapeHtml(comments)}</pre></p>
     <p>View all: <a href="https://nets.w4trc.org/view">https://nets.w4trc.org/view</a></p>
   `;
-  const mail = await sendMail(env, subject, htmlBody);
-
-  const ok = mail.ok
-    ? `<div class="ok"><strong>Saved!</strong> Thanks for sending your log.</div>`
-    : `<div class="err"><strong>Saved, but email failed:</strong> ${mail.status} ${mail.statusText}</div>`;
+  await sendMail(env, subject, htmlBody);
 
   const body = `
     <div class="card">
-      ${ok}
+      <div class="ok"><strong>Saved!</strong> Thanks for sending your log.</div>
       <h2>Submission recorded</h2>
-      <p><a class="btn" href="/submit">Submit another</a> &nbsp; <a class="btn" href="/view">Go to View</a></p>
+      <p>
+        <a class="btn" href="/submit">Submit another</a>
+        &nbsp; <a class="btn btn-ghost" href="/view">Go to View</a>
+        ${result.success ? `&nbsp; <a class="btn btn-ghost" href="/net/${result.lastRowId}">View this entry</a>` : ``}
+      </p>
     </div>`;
-  return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+  return new Response(HTML(body), {
+    headers: { 'content-type': 'text/html; charset=utf-8', 'set-cookie': authCookie() }
+  });
 }
 
 async function handleView(env: Env) {
@@ -218,7 +230,7 @@ async function handleView(env: Env) {
 
   const rows = (results ?? []).map((r: any) => `
     <tr>
-      <td>${r.net_date}</td>
+      <td><a href="/net/${r.id}">${r.net_date}</a></td>
       <td>${escapeHtml(r.net_control_callsign)}</td>
       <td>${escapeHtml(r.net_control_name)}</td>
       <td>${r.check_ins_count}</td>
@@ -227,12 +239,96 @@ async function handleView(env: Env) {
   const body = `
     <div class="card">
       <h1>W4TRC Nets — History</h1>
-      <p class="muted">Comments are private and not shown here.</p>
+      <p class="muted">Click a date to view full details. Comments are visible on detail pages only (requires passcode once per session).</p>
       <table>
         <thead><tr><th>Date</th><th>Control (Call)</th><th>Control (Name)</th><th># Check-ins</th></tr></thead>
         <tbody>${rows || `<tr><td colspan="4">No records yet.</td></tr>`}</tbody>
       </table>
     </div>`;
+  return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+}
+
+/* ----- Per-net detail (protected by passcode once per session) ----- */
+async function handleNetDetailGET(request: Request, env: Env, id: number) {
+  if (!hasAuthCookie(request)) {
+    const body = `
+      <div class="card">
+        <h1>View Net Details</h1>
+        <p class="muted">Enter the passcode to view check-ins and comments for this entry.</p>
+        <form method="post" action="/net/${id}">
+          <label for="password">Passcode *</label>
+          <input id="password" name="password" type="password" required />
+          <button class="btn" type="submit">View Details</button>
+          <a class="btn btn-ghost" href="/view">Back to list</a>
+        </form>
+      </div>`;
+    return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+  }
+  return await renderNetDetail(env, id);
+}
+
+async function handleNetDetailPOST(request: Request, env: Env, id: number) {
+  const form = await request.formData();
+  const password = textOrUndefined(form.get('password'));
+  if (!requireAuth(password, env)) {
+    const body = `<div class="card err"><strong>Access denied.</strong> Invalid passcode.</div>`;
+    return new Response(HTML(body), { status: 401, headers: { 'content-type': 'text/html; charset=utf-8' } });
+  }
+  const res = await renderNetDetail(env, id);
+  res.headers.append('set-cookie', authCookie());
+  return res;
+}
+
+async function renderNetDetail(env: Env, id: number) {
+  const row = await env.DB.prepare(
+    `SELECT id, net_date, net_control_callsign, net_control_name, check_ins_count, check_ins_list, comments, created_at
+     FROM nets WHERE id = ?1`
+  ).bind(id).first();
+  if (!row) {
+    return new Response(HTML(`<div class="card err"><strong>Not found.</strong></div>`), {
+      status: 404,
+      headers: { 'content-type': 'text/html; charset=utf-8' }
+    });
+  }
+
+  const body = `
+    <div class="card">
+      <h1>Net Details — ${row.net_date}</h1>
+      <p class="muted">Entry #${row.id} • Created ${escapeHtml(row.created_at)}</p>
+      <div class="grid-2">
+        <div>
+          <label>Net Control (Callsign)</label>
+          <input readonly value="${escapeHtml(row.net_control_callsign)}"/>
+        </div>
+        <div>
+          <label>Net Control (Name)</label>
+          <input readonly value="${escapeHtml(row.net_control_name)}"/>
+        </div>
+      </div>
+      <div style="margin-top:10px;">
+        <label># of Check-ins</label>
+        <input readonly value="${row.check_ins_count}"/>
+      </div>
+
+      <div style="margin-top:14px;">
+        <label>Check-ins List</label>
+        <div class="card" style="padding:12px; margin-top:4px;">
+          <div class="mono">${escapeHtml(row.check_ins_list || '')}</div>
+        </div>
+      </div>
+
+      <div style="margin-top:14px;">
+        <label>Comments</label>
+        <div class="card" style="padding:12px; margin-top:4px;">
+          <div class="mono">${escapeHtml(row.comments || '')}</div>
+        </div>
+      </div>
+
+      <p class="row">
+        <a class="btn btn-ghost" href="/view">Back to list</a>
+      </p>
+    </div>
+  `;
   return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
 }
 
@@ -305,6 +401,15 @@ export default {
     if (pathname === "/submit" && request.method === "POST") return handleSubmitPOST(request, env);
 
     if (pathname === "/view" && request.method === "GET") return handleView(env);
+
+    // Per-net detail: /net/:id (GET to prompt/login or show; POST to authenticate)
+    if (pathname.startsWith("/net/")) {
+      const idStr = pathname.slice("/net/".length).trim();
+      const id = Number(idStr);
+      if (!Number.isFinite(id) || id <= 0) return new Response("Bad ID", { status: 400 });
+      if (request.method === "GET") return handleNetDetailGET(request, env, id);
+      if (request.method === "POST") return handleNetDetailPOST(request, env, id);
+    }
 
     if (pathname === "/api/stats" && request.method === "GET") return handleApiStats(env);
     if (pathname === "/api/nets" && request.method === "GET") return handleApiNets(env, request);
