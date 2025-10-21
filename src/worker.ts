@@ -192,8 +192,8 @@ async function handleSubmitPOST(request: Request, env: Env) {
     <p><strong>Net Control:</strong> ${escapeHtml(net_control_name)} (${escapeHtml(net_control_callsign)})<br/>
        <strong>Check-ins:</strong> ${check_ins_count}</p>
     <p><strong>List:</strong><br/><pre>${escapeHtml(check_ins_list)}</pre></p>
-    <p><em>Comments are private and not included.</em></p>
-    <p>View all: <a href="https://net.w4trc.org/view">https://net.w4trc.org/view</a></p>
+    <p><strong>Comments (private):</strong><br/><pre>${escapeHtml(comments)}</pre></p>
+    <p>View all: <a href="https://nets.w4trc.org/view">https://nets.w4trc.org/view</a></p>
   `;
   const mail = await sendMail(env, subject, htmlBody);
 
