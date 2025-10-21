@@ -1,7 +1,7 @@
 // src/worker.ts
 export interface Env {
   DB: D1Database;
-  ADMIN_PASSWORD: string; // secret (used for submit + detail view)
+  ADMIN_PASSWORD: string; // secret (used for detail view)
   MAIL_FROM: string;      // e.g., "W4TRC Nets <no-reply@w4trc.org>"
   MAIL_FROM_NAME: string; // (not used by Resend; kept for compatibility)
   DISTRO?: string;        // comma-separated, static in wrangler.jsonc "vars"
@@ -119,15 +119,15 @@ async function handleSubmitGET() {
       <h1>W4TRC Net Submission</h1>
       <p class="muted">Submit totals for the weekly net. Fields marked * are required. For any questions, please email netcontrol@w4trc.org</p>
 
-      <form method="post" action="/submit">
+      <form method="post" action="/submit" autocomplete="off">
+        <!-- Honeypot for spam bots -->
+        <input type="text" name="website" tabindex="-1" aria-hidden="true"
+               style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden;" />
+
         <div class="grid-2">
           <div>
             <label for="net_date">Net Date *</label>
             <input id="net_date" name="net_date" type="date" required value="${today}" />
-          </div>
-          <div>
-            <label for="password">Passcode *</label>
-            <input id="password" name="password" type="password" placeholder="Shared passcode" required />
           </div>
         </div>
 
@@ -161,18 +161,25 @@ async function handleSubmitGET() {
 
         <button class="btn" type="submit">Save</button>
       </form>
-      <p class="muted" style="margin-top:10px;">After submission, totals become visible on <a href="/view">/view</a>.</p>
+      <p class="muted" style="margin-top:10px;">After submission, totals become visible on <a href="/view">/view</a>. Detailed check-ins & comments remain passcode-protected on per-entry pages.</p>
     </div>
   `;
   return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
 }
 
+
 async function handleSubmitPOST(request: Request, env: Env) {
   const form = await request.formData();
-  const password = textOrUndefined(form.get('password'));
-  if (!requireAuth(password, env)) {
-    const body = `<div class="card err"><strong>Access denied.</strong> Invalid passcode.</div>`;
-    return new Response(HTML(body), { status: 401, headers: { 'content-type': 'text/html; charset=utf-8' } });
+
+  // Honeypot check — if filled, likely a bot; pretend success but discard.
+  const website = textOrUndefined(form.get('website'));
+  if (website) {
+    const body = `
+      <div class="card">
+        <div class="ok"><strong>Saved!</strong> Thanks for sending your log.</div>
+        <p class="muted">If this was a mistake, you can <a href="/submit">try again</a>.</p>
+      </div>`;
+    return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
   }
 
   const net_date = textOrUndefined(form.get('net_date'));
@@ -187,7 +194,6 @@ async function handleSubmitPOST(request: Request, env: Env) {
     return new Response(HTML(body), { status: 400, headers: { 'content-type': 'text/html; charset=utf-8' } });
   }
 
-  // Insert
   const stmt = env.DB.prepare(
     `INSERT INTO nets (net_date, net_control_callsign, net_control_name, check_ins_count, check_ins_list, comments)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6)`
@@ -195,7 +201,7 @@ async function handleSubmitPOST(request: Request, env: Env) {
 
   const result = await stmt.run();
 
-  // Email via static distro (includes comments since you left them in the email body)
+  // Email distro
   const subject = `W4TRC Net: ${net_date} — ${check_ins_count} check-ins (${net_control_callsign})`;
   const htmlBody = `
     <h2>W4TRC Net Report — ${net_date}</h2>
@@ -214,13 +220,14 @@ async function handleSubmitPOST(request: Request, env: Env) {
       <p>
         <a class="btn" href="/submit">Submit another</a>
         &nbsp; <a class="btn btn-ghost" href="/view">Go to View</a>
-        ${result.success ? `&nbsp; <a class="btn btn-ghost" href="/net/${result.lastRowId}">View this entry</a>` : ``}
+        ${result.success ? `&nbsp; <a class="btn btn-ghost" href="/net/${result.lastRowId}">View this entry (passcode required)</a>` : ``}
       </p>
     </div>`;
   return new Response(HTML(body), {
-    headers: { 'content-type': 'text/html; charset=utf-8', 'set-cookie': authCookie() }
+    headers: { 'content-type': 'text/html; charset=utf-8' } // NOTE: no auth cookie set
   });
 }
+
 
 async function handleView(env: Env) {
   const { results } = await env.DB.prepare(
