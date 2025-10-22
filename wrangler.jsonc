@@ -23,10 +23,12 @@
 	],
 	// Environment vars (non-secret)
 	"vars": {
-		"DISTRO": "netcontrol@w4trc.org",
+		"DISTRO": "n4jhc@w4trc.org",
 		"MAIL_PROVIDER": "resend",
     	"MAIL_FROM": "W4TRC Nets <no-reply@w4trc.org>", // use a domain you verified in Resend
-		"TURNSTILE_SITE_KEY": "0x4AAAAAAB73shYt-jPMhXXB"
+		"TURNSTILE_SITE_KEY": "0x4AAAAAAB73shYt-jPMhXXB",
+		"SENTRY_ENVIRONMENT": "production",
+		"SENTRY_RELEASE": "nets-w4trc-org@1.0.0"
 	}
 	
 
