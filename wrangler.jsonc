@@ -8,7 +8,8 @@
 	"main": "src/worker.ts",
 	"compatibility_date": "2025-10-14",
 	"compatibility_flags": [
-		"global_fetch_strictly_public"
+		"global_fetch_strictly_public",
+		"nodejs_compat"
 	],
 	"observability": {
 		"enabled": true
@@ -26,7 +27,9 @@
 		"MAIL_PROVIDER": "resend",
     	"MAIL_FROM": "W4TRC Nets <no-reply@w4trc.org>", // use a domain you verified in Resend
 		"TURNSTILE_SITE_KEY": "0x4AAAAAAB73shYt-jPMhXXB"
-	}
+	},
+	{
+	
 	
 
 	/**
