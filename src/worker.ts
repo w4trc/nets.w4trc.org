@@ -267,6 +267,12 @@ async function handleSubmitPOST(request: Request, env: Env) {
         ${result.success ? `&nbsp; <a class="btn btn-ghost" href="/net/${result.lastRowId}">View this entry (passcode required)</a>` : ``}
       </p>
     </div>`;
+
+  // inside handleSubmitPOST()
+  Sentry.addBreadcrumb({ category: "net", message: "Submit POST received" });
+  Sentry.setTag("net.action", "submit");
+  Sentry.setUser({ ip_address: "auto" }); // already captured with sendDefaultPii, but explicit is ok
+
   return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
 }
 
