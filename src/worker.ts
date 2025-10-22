@@ -1,4 +1,7 @@
 // src/worker.ts
+
+import * as Sentry from "@sentry/cloudflare";
+
 export interface Env {
   DB: D1Database;
   ADMIN_PASSWORD: string; // secret (used for detail view)
@@ -8,6 +11,9 @@ export interface Env {
   RESEND_API_KEY: string; // secret
   TURNSTILE_SITE_KEY: string;   // public site key
   TURNSTILE_SECRET_KEY: string; // private secret key
+  SENTRY_DSN?: string;          // add via wrangler secret
+  SENTRY_ENVIRONMENT?: string;  // optional (e.g., "production", "staging")
+  SENTRY_RELEASE?: string;      // optional (git sha/build id)
 }
 
 /* ---------- HTML shell + styles ---------- */
@@ -433,43 +439,64 @@ function round2(n: any) {
   return Number.isFinite(x) ? Math.round(x * 100)/100 : null;
 }
 
-/* ---------- Worker fetch ---------- */
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    const { pathname } = url;
+export default Sentry.withSentry(
+  (env: Env) => ({
+    dsn: env.SENTRY_DSN,                // from secret
+    tracesSampleRate: 1.0,              // capture 100% of traces; tune in prod
+    enableLogs: true,                   // forward CF logs to Sentry
+    sendDefaultPii: true,               // captures IP and similar PII
+    environment: env.SENTRY_ENVIRONMENT || "production",
+    release: env.SENTRY_RELEASE,        // optional, improves source map linking
+    integrations: [],                   // (optional) add custom integrations here
+  }),
+  {
+    async fetch(request: Request, env: Env, ctx) {
+      // Helpful: add some request context for every event
+      Sentry.setTag("cf.worker", "w4trc-net-logging");
+      Sentry.setTag("request.method", request.method);
+      Sentry.setTag("request.urlpath", new URL(request.url).pathname);
 
-    if (pathname === "/" || pathname === "") return handleHome();
+      try {
+        const url = new URL(request.url);
+        const { pathname } = url;
 
-    if (pathname === "/submit" && request.method === "GET") return handleSubmitGET(env);
-    if (pathname === "/submit" && request.method === "POST") return handleSubmitPOST(request, env);
+        if (pathname === "/" || pathname === "") return handleHome();
 
-    
-    if (pathname === "/view" && request.method === "GET") return handleView(env);
+        if (pathname === "/submit" && request.method === "GET") return handleSubmitGET(env);
+        if (pathname === "/submit" && request.method === "POST") return handleSubmitPOST(request, env);
 
-    // Per-net detail: /net/:id (GET to prompt/login or show; POST to authenticate)
-    if (pathname.startsWith("/net/")) {
-      const idStr = pathname.slice("/net/".length).trim();
-      const id = Number(idStr);
-      if (!Number.isFinite(id) || id <= 0) return new Response("Bad ID", { status: 400 });
-      if (request.method === "GET") return handleNetDetailGET(request, env, id);
-      if (request.method === "POST") return handleNetDetailPOST(request, env, id);
-    }
+        if (pathname === "/view" && request.method === "GET") return handleView(env);
 
-    if (pathname === "/api/stats" && request.method === "GET") return handleApiStats(env);
-    if (pathname === "/api/nets" && request.method === "GET") return handleApiNets(env, request);
+        // Per-net detail: /net/:id (GET to prompt/login or show; POST to authenticate)
+        if (pathname.startsWith("/net/")) {
+          const idStr = pathname.slice("/net/".length).trim();
+          const id = Number(idStr);
+          if (!Number.isFinite(id) || id <= 0) return new Response("Bad ID", { status: 400 });
 
-    // CORS preflight for /api/*
-    if (pathname.startsWith("/api/") && request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: {
-          "access-control-allow-origin": "*",
-          "access-control-allow-methods": "GET, OPTIONS",
-          "access-control-allow-headers": "content-type"
+          if (request.method === "GET") return handleNetDetailGET(request, env, id);
+          if (request.method === "POST") return handleNetDetailPOST(request, env, id);
         }
-      });
-    }
 
-    return new Response("Not Found", { status: 404 });
-  }
-};
+        if (pathname === "/api/stats" && request.method === "GET") return handleApiStats(env);
+        if (pathname === "/api/nets" && request.method === "GET") return handleApiNets(env, request);
+
+        // CORS preflight for /api/*
+        if (pathname.startsWith("/api/") && request.method === "OPTIONS") {
+          return new Response(null, {
+            headers: {
+              "access-control-allow-origin": "*",
+              "access-control-allow-methods": "GET, OPTIONS",
+              "access-control-allow-headers": "content-type",
+            },
+          });
+        }
+
+        return new Response("Not Found", { status: 404 });
+      } catch (err) {
+        // Capture and return a safe response
+        Sentry.captureException(err);
+        return new Response("Internal Error", { status: 500 });
+      }
+    },
+  } satisfies ExportedHandler<Env>,
+);
