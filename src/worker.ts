@@ -66,6 +66,7 @@ const HTML = (body: string) => `<!doctype html>
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
   .row { display:flex; gap:10px; flex-wrap: wrap; margin-top: 8px; }
 </style>
+<script src="https://tracking.jclab.xyz/api/script.js" data-site-id="6590d26fb57f" defer></script>
 </head>
 <body>
   <div class="wrap">${body}</div>
