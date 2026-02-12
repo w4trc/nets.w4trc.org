@@ -381,7 +381,7 @@ async function inferNetWeekday(env: Env) {
 
 async function handleSignupGET(request: Request, env: Env) {
   const weekday = await inferNetWeekday(env);
-  const upcomingDates = buildUpcomingNetDates(weekday, 10, new Date());
+  const upcomingDates = buildUpcomingNetDates(weekday, 15, new Date());
   const placeholders = upcomingDates.map((_, i) => `?${i + 1}`).join(", ");
 
   const { results } = await env.DB.prepare(
