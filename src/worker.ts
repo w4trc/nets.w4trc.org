@@ -144,27 +144,23 @@ function buildUpcomingNetDates(targetWeekday: number, count: number, fromDate: D
   return dates;
 }
 
+function buildSignupFormUrl(netDate: string, role: NetRole, err?: string) {
+  const base = `/signup/new?net_date=${encodeURIComponent(netDate)}&role=${encodeURIComponent(role)}`;
+  if (!err) return base;
+  return `${base}&err=${encodeURIComponent(err)}`;
+}
+
 function slotCell(netDate: string, role: NetRole, signup?: NetSignupRecord) {
   if (signup) {
     return `
       <div><strong>${escapeHtml(signup.operator_callsign)}</strong></div>
       <div>${escapeHtml(signup.operator_name)}</div>
-      <div><a href="mailto:${escapeHtml(signup.operator_email)}">${escapeHtml(signup.operator_email)}</a></div>
     `;
   }
 
+  const signupUrl = `/signup/new?net_date=${encodeURIComponent(netDate)}&role=${encodeURIComponent(role)}`;
   return `
-    <form method="post" action="/signup">
-      <input type="hidden" name="net_date" value="${netDate}" />
-      <input type="hidden" name="role" value="${role}" />
-      <label for="operator_name_${netDate}_${role}" style="margin-top:0;">Name *</label>
-      <input id="operator_name_${netDate}_${role}" name="operator_name" required />
-      <label for="operator_email_${netDate}_${role}">Email *</label>
-      <input id="operator_email_${netDate}_${role}" name="operator_email" type="email" required />
-      <label for="operator_callsign_${netDate}_${role}">Callsign *</label>
-      <input id="operator_callsign_${netDate}_${role}" name="operator_callsign" required />
-      <button class="btn" type="submit">Sign up as ${titleRole(role)}</button>
-    </form>
+    <a class="btn" href="${signupUrl}">Sign up as ${titleRole(role)}</a>
   `;
 }
 
@@ -422,7 +418,7 @@ async function handleSignupGET(request: Request, env: Env) {
   const body = `
     <div class="card">
       <h1>W4TRC Net Operator Sign Up</h1>
-      <p class="muted">Sign up for upcoming weekly nets. Each date has one primary and one backup net controller slot.</p>
+      <p class="muted">Sign up for upcoming weekly nets. Each date has one primary and one backup net controller slot. Email addresses are kept private.</p>
       ${ok ? `<div class="ok"><strong>Saved.</strong> You are signed up for the selected slot.</div>` : ""}
       ${err ? `<div class="err"><strong>Could not save.</strong> ${escapeHtml(err)}</div>` : ""}
       <table>
@@ -445,7 +441,52 @@ async function handleSignupGET(request: Request, env: Env) {
   return new Response(HTML(body), { headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
-async function handleSignupPOST(request: Request, env: Env) {
+async function handleSignupNewGET(request: Request, env: Env) {
+  const url = new URL(request.url);
+  const net_date = textOrUndefined(url.searchParams.get("net_date"));
+  const roleRaw = textOrUndefined(url.searchParams.get("role"));
+  const err = textOrUndefined(url.searchParams.get("err"));
+
+  if (!net_date || !isValidNetDate(net_date)) return redirect("/signup?err=Invalid+net+date");
+  if (!roleRaw || (roleRaw !== "primary" && roleRaw !== "backup")) return redirect("/signup?err=Invalid+role");
+
+  const role = roleRaw as NetRole;
+  const existing = await env.DB.prepare(
+    `SELECT id FROM net_signups WHERE net_date = ?1 AND role = ?2`
+  ).bind(net_date, role).first();
+  if (existing) {
+    return redirect(`/signup?err=${encodeURIComponent(`${titleRole(role)} slot is already taken for ${net_date}`)}`);
+  }
+
+  const body = `
+    <div class="card">
+      <h1>Sign Up for Net Control</h1>
+      <p class="muted"><strong>Date:</strong> ${escapeHtml(formatDateDisplay(net_date))} (${escapeHtml(net_date)})<br/>
+      <strong>Role:</strong> ${escapeHtml(titleRole(role))}</p>
+      ${err ? `<div class="err"><strong>Could not save.</strong> ${escapeHtml(err)}</div>` : ""}
+      <form method="post" action="/signup/new">
+        <input type="hidden" name="net_date" value="${escapeHtml(net_date)}" />
+        <input type="hidden" name="role" value="${escapeHtml(role)}" />
+
+        <label for="operator_name">Name *</label>
+        <input id="operator_name" name="operator_name" required />
+
+        <label for="operator_email">Email *</label>
+        <input id="operator_email" name="operator_email" type="email" required />
+
+        <label for="operator_callsign">Callsign *</label>
+        <input id="operator_callsign" name="operator_callsign" required />
+
+        <button class="btn" type="submit">Confirm Signup</button>
+        <a class="btn btn-ghost" href="/signup">Back to Schedule</a>
+      </form>
+    </div>
+  `;
+
+  return new Response(HTML(body), { headers: { "content-type": "text/html; charset=utf-8" } });
+}
+
+async function handleSignupNewPOST(request: Request, env: Env) {
   const form = await request.formData();
   const net_date = textOrUndefined(form.get("net_date"));
   const roleRaw = textOrUndefined(form.get("role"));
@@ -455,11 +496,12 @@ async function handleSignupPOST(request: Request, env: Env) {
 
   if (!net_date || !isValidNetDate(net_date)) return redirect("/signup?err=Invalid+net+date");
   if (!roleRaw || (roleRaw !== "primary" && roleRaw !== "backup")) return redirect("/signup?err=Invalid+role");
-  if (!operator_name) return redirect("/signup?err=Name+is+required");
-  if (!operator_email || !isValidEmail(operator_email)) return redirect("/signup?err=Valid+email+is+required");
-  if (!operator_callsign) return redirect("/signup?err=Callsign+is+required");
 
   const role = roleRaw as NetRole;
+  if (!operator_name) return redirect(buildSignupFormUrl(net_date, role, "Name is required"));
+  if (!operator_email || !isValidEmail(operator_email)) return redirect(buildSignupFormUrl(net_date, role, "Valid email is required"));
+  if (!operator_callsign) return redirect(buildSignupFormUrl(net_date, role, "Callsign is required"));
+
   const callsign = normalizeCallsign(operator_callsign);
 
   const existing = await env.DB.prepare(
@@ -691,7 +733,8 @@ export default Sentry.withSentry(
         if (pathname === "/submit" && request.method === "POST") return handleSubmitPOST(request, env);
 
         if (pathname === "/signup" && request.method === "GET") return handleSignupGET(request, env);
-        if (pathname === "/signup" && request.method === "POST") return handleSignupPOST(request, env);
+        if (pathname === "/signup/new" && request.method === "GET") return handleSignupNewGET(request, env);
+        if (pathname === "/signup/new" && request.method === "POST") return handleSignupNewPOST(request, env);
 
         if (pathname === "/view" && request.method === "GET") return handleView(env);
 
