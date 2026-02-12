@@ -66,7 +66,6 @@ const HTML = (body: string) => `<!doctype html>
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
   .row { display:flex; gap:10px; flex-wrap: wrap; margin-top: 8px; }
 </style>
-<script src="https://tracking.jclab.xyz/api/script.js" data-site-id="6590d26fb57f" defer></script>
 </head>
 <body>
   <div class="wrap">${body}</div>
@@ -92,6 +91,81 @@ function hasAuthCookie(request: Request) {
 function authCookie() {
   // 30-minute session cookie for detail pages
   return `net_auth=1; Max-Age=1800; Path=/; Secure; HttpOnly; SameSite=Lax`;
+}
+
+type NetRole = "primary" | "backup";
+type NetSignupRecord = {
+  net_date: string;
+  role: NetRole;
+  operator_name: string;
+  operator_email: string;
+  operator_callsign: string;
+};
+
+function isValidNetDate(v: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(v);
+}
+
+function isValidEmail(v: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+}
+
+function normalizeCallsign(v: string) {
+  return v.trim().toUpperCase();
+}
+
+function titleRole(role: NetRole) {
+  return role === "primary" ? "Primary" : "Backup";
+}
+
+function formatDateDisplay(isoDate: string) {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(dt);
+}
+
+function buildUpcomingNetDates(targetWeekday: number, count: number, fromDate: Date) {
+  const dates: string[] = [];
+  const start = new Date(Date.UTC(fromDate.getUTCFullYear(), fromDate.getUTCMonth(), fromDate.getUTCDate()));
+  const daysAhead = (targetWeekday - start.getUTCDay() + 7) % 7;
+  start.setUTCDate(start.getUTCDate() + daysAhead);
+
+  for (let i = 0; i < count; i++) {
+    const d = new Date(start);
+    d.setUTCDate(start.getUTCDate() + i * 7);
+    dates.push(d.toISOString().slice(0, 10));
+  }
+  return dates;
+}
+
+function slotCell(netDate: string, role: NetRole, signup?: NetSignupRecord) {
+  if (signup) {
+    return `
+      <div><strong>${escapeHtml(signup.operator_callsign)}</strong></div>
+      <div>${escapeHtml(signup.operator_name)}</div>
+      <div><a href="mailto:${escapeHtml(signup.operator_email)}">${escapeHtml(signup.operator_email)}</a></div>
+    `;
+  }
+
+  return `
+    <form method="post" action="/signup">
+      <input type="hidden" name="net_date" value="${netDate}" />
+      <input type="hidden" name="role" value="${role}" />
+      <label for="operator_name_${netDate}_${role}" style="margin-top:0;">Name *</label>
+      <input id="operator_name_${netDate}_${role}" name="operator_name" required />
+      <label for="operator_email_${netDate}_${role}">Email *</label>
+      <input id="operator_email_${netDate}_${role}" name="operator_email" type="email" required />
+      <label for="operator_callsign_${netDate}_${role}">Callsign *</label>
+      <input id="operator_callsign_${netDate}_${role}" name="operator_callsign" required />
+      <button class="btn" type="submit">Sign up as ${titleRole(role)}</button>
+    </form>
+  `;
 }
 
 async function verifyTurnstile(request: Request, env: Env, token: string | null) {
@@ -197,6 +271,9 @@ async function handleSubmitGET(env?: Env) {
         <button class="btn" type="submit">Save</button>
       </form>
       <p class="muted" style="margin-top:10px;">After submission, totals are on <a href="/view">/view</a>. Full check-ins & comments remain passcode-protected on per-entry pages.</p>
+      <p class="row">
+        <a class="btn btn-ghost" href="/signup">Net Sign Up</a>
+      </p>
     </div>
   `;
   return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
@@ -222,7 +299,10 @@ async function handleSubmitPOST(request: Request, env: Env) {
   const token = (form.get("cf-turnstile-response") as string) ?? null;
   const outcome = await verifyTurnstile(request, env, token);
   if (!outcome.success) {
-    const msg = outcome["error-codes"]?.join(", ") || "Verification failed";
+    const msg =
+      ("error-codes" in outcome && Array.isArray(outcome["error-codes"]) && outcome["error-codes"].length)
+        ? outcome["error-codes"].join(", ")
+        : ("code" in outcome && outcome.code ? outcome.code : "Verification failed");
     const body = `<div class="card err"><strong>Human check failed.</strong> ${escapeHtml(msg)}. Please try again.</div>`;
     return new Response(HTML(body), { status: 403, headers: { 'content-type': 'text/html; charset=utf-8' } });
   }
@@ -246,6 +326,7 @@ async function handleSubmitPOST(request: Request, env: Env) {
   ).bind(net_date, net_control_callsign, net_control_name, check_ins_count, check_ins_list, comments);
 
   const result = await stmt.run();
+  const lastRowId = (result as any)?.meta?.last_row_id ?? (result as any)?.lastRowId;
 
   const subject = `W4TRC Net: ${net_date} — ${check_ins_count} check-ins (${net_control_callsign})`;
   const htmlBody = `
@@ -265,7 +346,7 @@ async function handleSubmitPOST(request: Request, env: Env) {
       <p>
         <a class="btn" href="/submit">Submit another</a>
         &nbsp; <a class="btn btn-ghost" href="/view">Go to View</a>
-        ${result.success ? `&nbsp; <a class="btn btn-ghost" href="/net/${result.lastRowId}">View this entry (passcode required)</a>` : ``}
+        ${lastRowId ? `&nbsp; <a class="btn btn-ghost" href="/net/${lastRowId}">View this entry (passcode required)</a>` : ``}
       </p>
     </div>`;
 
@@ -275,6 +356,138 @@ async function handleSubmitPOST(request: Request, env: Env) {
   Sentry.setUser({ ip_address: "auto" }); // already captured with sendDefaultPii, but explicit is ok
 
   return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+}
+
+async function inferNetWeekday(env: Env) {
+  const { results } = await env.DB.prepare(
+    `SELECT net_date FROM nets ORDER BY net_date DESC, id DESC LIMIT 24`
+  ).all();
+
+  const counts = new Array<number>(7).fill(0);
+  for (const r of results ?? []) {
+    const netDate = typeof (r as any).net_date === "string" ? (r as any).net_date : "";
+    if (!isValidNetDate(netDate)) continue;
+    const [year, month, day] = netDate.split("-").map(Number);
+    const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+    counts[weekday] += 1;
+  }
+
+  let bestDay = 4; // Thursday default
+  let bestCount = -1;
+  for (let i = 0; i < counts.length; i++) {
+    if (counts[i] > bestCount) {
+      bestCount = counts[i];
+      bestDay = i;
+    }
+  }
+  return bestDay;
+}
+
+async function handleSignupGET(request: Request, env: Env) {
+  const weekday = await inferNetWeekday(env);
+  const upcomingDates = buildUpcomingNetDates(weekday, 10, new Date());
+  const placeholders = upcomingDates.map((_, i) => `?${i + 1}`).join(", ");
+
+  const { results } = await env.DB.prepare(
+    `SELECT net_date, role, operator_name, operator_email, operator_callsign
+     FROM net_signups
+     WHERE net_date IN (${placeholders})
+     ORDER BY net_date ASC`
+  ).bind(...upcomingDates).all();
+
+  const byDateAndRole = new Map<string, NetSignupRecord>();
+  for (const r of results ?? []) {
+    const row = r as NetSignupRecord;
+    byDateAndRole.set(`${row.net_date}:${row.role}`, row);
+  }
+
+  const url = new URL(request.url);
+  const ok = textOrUndefined(url.searchParams.get("ok"));
+  const err = textOrUndefined(url.searchParams.get("err"));
+
+  const rows = upcomingDates
+    .map((netDate) => {
+      const primary = byDateAndRole.get(`${netDate}:primary`);
+      const backup = byDateAndRole.get(`${netDate}:backup`);
+      return `
+        <tr>
+          <td><strong>${escapeHtml(formatDateDisplay(netDate))}</strong></td>
+          <td>${slotCell(netDate, "primary", primary)}</td>
+          <td>${slotCell(netDate, "backup", backup)}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  const body = `
+    <div class="card">
+      <h1>W4TRC Net Operator Sign Up</h1>
+      <p class="muted">Sign up for upcoming weekly nets. Each date has one primary and one backup net controller slot.</p>
+      ${ok ? `<div class="ok"><strong>Saved.</strong> You are signed up for the selected slot.</div>` : ""}
+      ${err ? `<div class="err"><strong>Could not save.</strong> ${escapeHtml(err)}</div>` : ""}
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Primary Controller</th>
+            <th>Backup Controller</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="row">
+        <a class="btn btn-ghost" href="/submit">Submit Net Log</a>
+        <a class="btn btn-ghost" href="/view">View Net History</a>
+      </p>
+    </div>
+  `;
+
+  return new Response(HTML(body), { headers: { "content-type": "text/html; charset=utf-8" } });
+}
+
+async function handleSignupPOST(request: Request, env: Env) {
+  const form = await request.formData();
+  const net_date = textOrUndefined(form.get("net_date"));
+  const roleRaw = textOrUndefined(form.get("role"));
+  const operator_name = textOrUndefined(form.get("operator_name"));
+  const operator_email = textOrUndefined(form.get("operator_email"));
+  const operator_callsign = textOrUndefined(form.get("operator_callsign"));
+
+  if (!net_date || !isValidNetDate(net_date)) return redirect("/signup?err=Invalid+net+date");
+  if (!roleRaw || (roleRaw !== "primary" && roleRaw !== "backup")) return redirect("/signup?err=Invalid+role");
+  if (!operator_name) return redirect("/signup?err=Name+is+required");
+  if (!operator_email || !isValidEmail(operator_email)) return redirect("/signup?err=Valid+email+is+required");
+  if (!operator_callsign) return redirect("/signup?err=Callsign+is+required");
+
+  const role = roleRaw as NetRole;
+  const callsign = normalizeCallsign(operator_callsign);
+
+  const existing = await env.DB.prepare(
+    `SELECT id FROM net_signups WHERE net_date = ?1 AND role = ?2`
+  ).bind(net_date, role).first();
+
+  if (existing) {
+    return redirect(`/signup?err=${encodeURIComponent(`${titleRole(role)} slot is already taken for ${net_date}`)}`);
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO net_signups (net_date, role, operator_name, operator_email, operator_callsign)
+     VALUES (?1, ?2, ?3, ?4, ?5)`
+  ).bind(net_date, role, operator_name, operator_email, callsign).run();
+
+  const subject = `W4TRC Net Signup: ${net_date} ${titleRole(role)} (${callsign})`;
+  const htmlBody = `
+    <h2>Net Signup Received</h2>
+    <p><strong>Date:</strong> ${escapeHtml(net_date)}<br/>
+       <strong>Role:</strong> ${escapeHtml(titleRole(role))}<br/>
+       <strong>Name:</strong> ${escapeHtml(operator_name)}<br/>
+       <strong>Callsign:</strong> ${escapeHtml(callsign)}<br/>
+       <strong>Email:</strong> ${escapeHtml(operator_email)}</p>
+    <p>View schedule: <a href="https://nets.w4trc.org/signup">https://nets.w4trc.org/signup</a></p>
+  `;
+  await sendMail(env, subject, htmlBody);
+
+  return redirect("/signup?ok=1");
 }
 
 
@@ -301,6 +514,10 @@ async function handleView(env: Env) {
         <thead><tr><th>Date</th><th>Control (Call)</th><th>Control (Name)</th><th># Check-ins</th></tr></thead>
         <tbody>${rows || `<tr><td colspan="4">No records yet.</td></tr>`}</tbody>
       </table>
+      <p class="row">
+        <a class="btn btn-ghost" href="/signup">Net Sign Up</a>
+        <a class="btn btn-ghost" href="/submit">Submit Net Log</a>
+      </p>
     </div>`;
   return new Response(HTML(body), { headers: { 'content-type': 'text/html; charset=utf-8' } });
 }
@@ -347,37 +564,38 @@ async function renderNetDetail(env: Env, id: number) {
       headers: { 'content-type': 'text/html; charset=utf-8' }
     });
   }
+  const net = row as Record<string, unknown>;
 
   const body = `
     <div class="card">
-      <h1>Net Details — ${row.net_date}</h1>
-      <p class="muted">Entry #${row.id} • Created ${escapeHtml(row.created_at)}</p>
+      <h1>Net Details — ${String(net.net_date ?? "")}</h1>
+      <p class="muted">Entry #${String(net.id ?? "")} • Created ${escapeHtml(String(net.created_at ?? ""))}</p>
       <div class="grid-2">
         <div>
           <label>Net Control (Callsign)</label>
-          <input readonly value="${escapeHtml(row.net_control_callsign)}"/>
+          <input readonly value="${escapeHtml(String(net.net_control_callsign ?? ""))}"/>
         </div>
         <div>
           <label>Net Control (Name)</label>
-          <input readonly value="${escapeHtml(row.net_control_name)}"/>
+          <input readonly value="${escapeHtml(String(net.net_control_name ?? ""))}"/>
         </div>
       </div>
       <div style="margin-top:10px;">
         <label># of Check-ins</label>
-        <input readonly value="${row.check_ins_count}"/>
+        <input readonly value="${String(net.check_ins_count ?? 0)}"/>
       </div>
 
       <div style="margin-top:14px;">
         <label>Check-ins List</label>
         <div class="card" style="padding:12px; margin-top:4px;">
-          <div class="mono">${escapeHtml(row.check_ins_list || '')}</div>
+          <div class="mono">${escapeHtml(String(net.check_ins_list ?? ""))}</div>
         </div>
       </div>
 
       <div style="margin-top:14px;">
         <label>Comments</label>
         <div class="card" style="padding:12px; margin-top:4px;">
-          <div class="mono">${escapeHtml(row.comments || '')}</div>
+          <div class="mono">${escapeHtml(String(net.comments ?? ""))}</div>
         </div>
       </div>
 
@@ -408,10 +626,10 @@ async function handleApiStats(env: Env) {
   ).bind(d180, today).first();
 
   const payload = {
-    last_check_ins: last?.check_ins_count ?? null,
-    last_date: last?.net_date ?? null,
-    avg_90d: round2(avg90?.avg),
-    avg_180d: round2(avg180?.avg),
+    last_check_ins: (last as any)?.check_ins_count ?? null,
+    last_date: (last as any)?.net_date ?? null,
+    avg_90d: round2((avg90 as any)?.avg),
+    avg_180d: round2((avg180 as any)?.avg),
     generated_at: new Date().toISOString(),
   };
 
@@ -471,6 +689,9 @@ export default Sentry.withSentry(
 
         if (pathname === "/submit" && request.method === "GET") return handleSubmitGET(env);
         if (pathname === "/submit" && request.method === "POST") return handleSubmitPOST(request, env);
+
+        if (pathname === "/signup" && request.method === "GET") return handleSignupGET(request, env);
+        if (pathname === "/signup" && request.method === "POST") return handleSignupPOST(request, env);
 
         if (pathname === "/view" && request.method === "GET") return handleView(env);
 
