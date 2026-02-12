@@ -517,18 +517,6 @@ async function handleSignupNewPOST(request: Request, env: Env) {
      VALUES (?1, ?2, ?3, ?4, ?5)`
   ).bind(net_date, role, operator_name, operator_email, callsign).run();
 
-  const subject = `W4TRC Net Signup: ${net_date} ${titleRole(role)} (${callsign})`;
-  const htmlBody = `
-    <h2>Net Signup Received</h2>
-    <p><strong>Date:</strong> ${escapeHtml(net_date)}<br/>
-       <strong>Role:</strong> ${escapeHtml(titleRole(role))}<br/>
-       <strong>Name:</strong> ${escapeHtml(operator_name)}<br/>
-       <strong>Callsign:</strong> ${escapeHtml(callsign)}<br/>
-       <strong>Email:</strong> ${escapeHtml(operator_email)}</p>
-    <p>View schedule: <a href="https://nets.w4trc.org/signup">https://nets.w4trc.org/signup</a></p>
-  `;
-  await sendMail(env, subject, htmlBody);
-
   return redirect("/signup?ok=1");
 }
 
