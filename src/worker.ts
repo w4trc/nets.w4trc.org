@@ -111,6 +111,43 @@ type NetSignupRecord = {
   operator_email: string;
   operator_callsign: string;
 };
+type SlotAssignment = {
+  operator_name: string;
+  operator_callsign: string;
+  source: "signup" | "override";
+};
+type RecurringOverrideRule = {
+  label: string;
+  role: NetRole;
+  operator_name: string;
+  operator_callsign: string;
+  type: "every_n_weeks" | "nth_weekday_of_month";
+  every_weeks?: number;
+  anchor_date?: string;
+  weekday?: number; // 0=Sun..6=Sat
+  nth?: number; // 1..5
+};
+
+const RECURRING_OVERRIDES: RecurringOverrideRule[] = [
+  {
+    label: "George DeVault second Sunday",
+    role: "primary",
+    operator_name: "George DeVault",
+    operator_callsign: "W3KPT",
+    type: "nth_weekday_of_month",
+    nth: 2,
+    weekday: 0, // Sunday
+  },
+  {
+    label: "Kevin Morrell third Sunday",
+    role: "primary",
+    operator_name: "Kevin Morrell",
+    operator_callsign: "KM4DCK",
+    type: "nth_weekday_of_month",
+    nth: 3,
+    weekday: 0, // Sunday
+  },
+];
 
 function isValidNetDate(v: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(v);
@@ -140,18 +177,81 @@ function formatDateDisplay(isoDate: string) {
   }).format(dt);
 }
 
-function buildUpcomingNetDates(targetWeekday: number, count: number, fromDate: Date) {
-  const dates: string[] = [];
-  const start = new Date(Date.UTC(fromDate.getUTCFullYear(), fromDate.getUTCMonth(), fromDate.getUTCDate()));
-  const daysAhead = (targetWeekday - start.getUTCDay() + 7) % 7;
-  start.setUTCDate(start.getUTCDate() + daysAhead);
+function parseIsoDateUTC(isoDate: string) {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day));
+}
 
-  for (let i = 0; i < count; i++) {
-    const d = new Date(start);
-    d.setUTCDate(start.getUTCDate() + i * 7);
-    dates.push(d.toISOString().slice(0, 10));
+function toIsoDateUTC(d: Date) {
+  return d.toISOString().slice(0, 10);
+}
+
+function dayDiffUTC(fromDate: Date, toDate: Date) {
+  const ms = toDate.getTime() - fromDate.getTime();
+  return Math.floor(ms / (24 * 3600 * 1000));
+}
+
+function matchesRecurringOverride(rule: RecurringOverrideRule, isoDate: string, defaultWeekday: number) {
+  if (!isValidNetDate(isoDate)) return false;
+  const date = parseIsoDateUTC(isoDate);
+  const weekday = date.getUTCDay();
+  const targetWeekday = rule.weekday ?? defaultWeekday;
+
+  if (rule.type === "every_n_weeks") {
+    if (!rule.anchor_date || !rule.every_weeks || rule.every_weeks < 1) return false;
+    if (weekday !== targetWeekday) return false;
+    const anchor = parseIsoDateUTC(rule.anchor_date);
+    const days = dayDiffUTC(anchor, date);
+    if (days < 0) return false;
+    if (days % 7 !== 0) return false;
+    const weeks = Math.floor(days / 7);
+    return weeks % rule.every_weeks === 0;
   }
-  return dates;
+
+  if (rule.type === "nth_weekday_of_month") {
+    if (!rule.nth || rule.nth < 1 || rule.nth > 5) return false;
+    if (weekday !== targetWeekday) return false;
+    const day = date.getUTCDate();
+    const nth = Math.floor((day - 1) / 7) + 1;
+    return nth === rule.nth;
+  }
+
+  return false;
+}
+
+function resolveRecurringOverride(netDate: string, role: NetRole, defaultWeekday: number): SlotAssignment | undefined {
+  for (const rule of RECURRING_OVERRIDES) {
+    if (rule.role !== role) continue;
+    if (!matchesRecurringOverride(rule, netDate, defaultWeekday)) continue;
+    return {
+      operator_name: rule.operator_name,
+      operator_callsign: normalizeCallsign(rule.operator_callsign),
+      source: "override",
+    };
+  }
+  return undefined;
+}
+
+function buildScheduleDates(defaultWeekday: number, fromDate: Date, horizonDays: number, maxRows: number) {
+  const set = new Set<string>();
+  const start = new Date(Date.UTC(fromDate.getUTCFullYear(), fromDate.getUTCMonth(), fromDate.getUTCDate()));
+
+  for (let i = 0; i <= horizonDays; i++) {
+    const d = new Date(start);
+    d.setUTCDate(start.getUTCDate() + i);
+    const iso = toIsoDateUTC(d);
+    const weekday = d.getUTCDay();
+    if (weekday === defaultWeekday) set.add(iso);
+
+    for (const rule of RECURRING_OVERRIDES) {
+      if (matchesRecurringOverride(rule, iso, defaultWeekday)) {
+        set.add(iso);
+        break;
+      }
+    }
+  }
+
+  return Array.from(set).sort((a, b) => a.localeCompare(b)).slice(0, maxRows);
 }
 
 function buildSignupFormUrl(netDate: string, role: NetRole, err?: string) {
@@ -160,11 +260,13 @@ function buildSignupFormUrl(netDate: string, role: NetRole, err?: string) {
   return `${base}&err=${encodeURIComponent(err)}`;
 }
 
-function slotCell(netDate: string, role: NetRole, signup?: NetSignupRecord) {
-  if (signup) {
+function slotCell(netDate: string, role: NetRole, assignment?: SlotAssignment) {
+  if (assignment) {
+    const recurring = assignment.source === "override" ? `<div class="muted">Recurring assignment</div>` : "";
     return `
-      <div><strong>${escapeHtml(signup.operator_callsign)}</strong></div>
-      <div>${escapeHtml(signup.operator_name)}</div>
+      <div><strong>${escapeHtml(assignment.operator_callsign)}</strong></div>
+      <div>${escapeHtml(assignment.operator_name)}</div>
+      ${recurring}
     `;
   }
 
@@ -391,7 +493,7 @@ async function inferNetWeekday(env: Env) {
 
 async function handleSignupGET(request: Request, env: Env) {
   const weekday = await inferNetWeekday(env);
-  const upcomingDates = buildUpcomingNetDates(weekday, 15, new Date());
+  const upcomingDates = buildScheduleDates(weekday, new Date(), 140, 20);
   const placeholders = upcomingDates.map((_, i) => `?${i + 1}`).join(", ");
 
   const { results } = await env.DB.prepare(
@@ -401,10 +503,14 @@ async function handleSignupGET(request: Request, env: Env) {
      ORDER BY net_date ASC`
   ).bind(...upcomingDates).all();
 
-  const byDateAndRole = new Map<string, NetSignupRecord>();
+  const byDateAndRole = new Map<string, SlotAssignment>();
   for (const r of results ?? []) {
     const row = r as NetSignupRecord;
-    byDateAndRole.set(`${row.net_date}:${row.role}`, row);
+    byDateAndRole.set(`${row.net_date}:${row.role}`, {
+      operator_name: row.operator_name,
+      operator_callsign: row.operator_callsign,
+      source: "signup",
+    });
   }
 
   const url = new URL(request.url);
@@ -413,8 +519,8 @@ async function handleSignupGET(request: Request, env: Env) {
 
   const rows = upcomingDates
     .map((netDate) => {
-      const primary = byDateAndRole.get(`${netDate}:primary`);
-      const backup = byDateAndRole.get(`${netDate}:backup`);
+      const primary = resolveRecurringOverride(netDate, "primary", weekday) ?? byDateAndRole.get(`${netDate}:primary`);
+      const backup = resolveRecurringOverride(netDate, "backup", weekday) ?? byDateAndRole.get(`${netDate}:backup`);
       return `
         <tr>
           <td><strong>${escapeHtml(formatDateDisplay(netDate))}</strong></td>
@@ -461,6 +567,12 @@ async function handleSignupNewGET(request: Request, env: Env) {
   if (!roleRaw || (roleRaw !== "primary" && roleRaw !== "backup")) return redirect("/signup?err=Invalid+role");
 
   const role = roleRaw as NetRole;
+  const weekday = await inferNetWeekday(env);
+  const recurring = resolveRecurringOverride(net_date, role, weekday);
+  if (recurring) {
+    return redirect(`/signup?err=${encodeURIComponent(`${titleRole(role)} is pre-assigned to ${recurring.operator_callsign} for ${net_date}`)}`);
+  }
+
   const existing = await env.DB.prepare(
     `SELECT id FROM net_signups WHERE net_date = ?1 AND role = ?2`
   ).bind(net_date, role).first();
@@ -508,6 +620,12 @@ async function handleSignupNewPOST(request: Request, env: Env) {
   if (!roleRaw || (roleRaw !== "primary" && roleRaw !== "backup")) return redirect("/signup?err=Invalid+role");
 
   const role = roleRaw as NetRole;
+  const weekday = await inferNetWeekday(env);
+  const recurring = resolveRecurringOverride(net_date, role, weekday);
+  if (recurring) {
+    return redirect(`/signup?err=${encodeURIComponent(`${titleRole(role)} is pre-assigned to ${recurring.operator_callsign} for ${net_date}`)}`);
+  }
+
   if (!operator_name) return redirect(buildSignupFormUrl(net_date, role, "Name is required"));
   if (!operator_email || !isValidEmail(operator_email)) return redirect(buildSignupFormUrl(net_date, role, "Valid email is required"));
   if (!operator_callsign) return redirect(buildSignupFormUrl(net_date, role, "Callsign is required"));
