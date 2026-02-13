@@ -92,6 +92,16 @@ function authCookie() {
   // 30-minute session cookie for detail pages
   return `net_auth=1; Max-Age=1800; Path=/; Secure; HttpOnly; SameSite=Lax`;
 }
+function hasSignupAdminCookie(request: Request) {
+  const cookie = request.headers.get("cookie") || "";
+  return /signup_admin=1/.test(cookie);
+}
+function signupAdminCookie() {
+  return `signup_admin=1; Max-Age=1800; Path=/; Secure; HttpOnly; SameSite=Lax`;
+}
+function clearSignupAdminCookie() {
+  return `signup_admin=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax`;
+}
 
 type NetRole = "primary" | "backup";
 type NetSignupRecord = {
@@ -520,6 +530,115 @@ async function handleSignupNewPOST(request: Request, env: Env) {
   return redirect("/signup?ok=1");
 }
 
+async function handleSignupAdminGET(request: Request, env: Env) {
+  const url = new URL(request.url);
+  const err = textOrUndefined(url.searchParams.get("err"));
+  const ok = textOrUndefined(url.searchParams.get("ok"));
+
+  if (!hasSignupAdminCookie(request)) {
+    const body = `
+      <div class="card">
+        <h1>Signup Admin</h1>
+        <p class="muted">Enter admin passcode to manage net signups.</p>
+        ${err ? `<div class="err"><strong>Access denied.</strong> ${escapeHtml(err)}</div>` : ""}
+        <form method="post" action="/signup/admin/login">
+          <label for="password">Passcode *</label>
+          <input id="password" name="password" type="password" required />
+          <button class="btn" type="submit">Log In</button>
+          <a class="btn btn-ghost" href="/signup">Back to Schedule</a>
+        </form>
+      </div>
+    `;
+    return new Response(HTML(body), { headers: { "content-type": "text/html; charset=utf-8" } });
+  }
+
+  const { results } = await env.DB.prepare(
+    `SELECT id, net_date, role, operator_name, operator_email, operator_callsign, created_at
+     FROM net_signups
+     ORDER BY net_date ASC, role ASC, id ASC`
+  ).all();
+
+  const rows = (results ?? [])
+    .map((r: any) => `
+      <tr>
+        <td>${escapeHtml(String(r.net_date ?? ""))}</td>
+        <td>${escapeHtml(titleRole(r.role === "backup" ? "backup" : "primary"))}</td>
+        <td>${escapeHtml(String(r.operator_callsign ?? ""))}</td>
+        <td>${escapeHtml(String(r.operator_name ?? ""))}</td>
+        <td>${escapeHtml(String(r.operator_email ?? ""))}</td>
+        <td>${escapeHtml(String(r.created_at ?? ""))}</td>
+        <td>
+          <form method="post" action="/signup/admin/delete" onsubmit="return confirm('Delete this registration?');">
+            <input type="hidden" name="id" value="${escapeHtml(String(r.id ?? ""))}" />
+            <button class="btn" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+    `)
+    .join("");
+
+  const body = `
+    <div class="card">
+      <h1>Signup Admin</h1>
+      <p class="muted">Manage net signup registrations.</p>
+      ${ok ? `<div class="ok"><strong>Success.</strong> ${escapeHtml(ok)}</div>` : ""}
+      ${err ? `<div class="err"><strong>Error.</strong> ${escapeHtml(err)}</div>` : ""}
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Role</th>
+            <th>Callsign</th>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Created</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>${rows || `<tr><td colspan="7">No signups yet.</td></tr>`}</tbody>
+      </table>
+      <p class="row">
+        <form method="post" action="/signup/admin/logout">
+          <button class="btn btn-ghost" type="submit">Log Out</button>
+        </form>
+        <a class="btn btn-ghost" href="/signup">Back to Schedule</a>
+      </p>
+    </div>
+  `;
+  return new Response(HTML(body), { headers: { "content-type": "text/html; charset=utf-8" } });
+}
+
+async function handleSignupAdminLoginPOST(request: Request, env: Env) {
+  const form = await request.formData();
+  const password = textOrUndefined(form.get("password"));
+  if (!requireAuth(password, env)) return redirect("/signup/admin?err=Invalid+passcode");
+
+  const res = redirect("/signup/admin");
+  res.headers.append("set-cookie", signupAdminCookie());
+  return res;
+}
+
+async function handleSignupAdminLogoutPOST() {
+  const res = redirect("/signup/admin");
+  res.headers.append("set-cookie", clearSignupAdminCookie());
+  return res;
+}
+
+async function handleSignupAdminDeletePOST(request: Request, env: Env) {
+  if (!hasSignupAdminCookie(request)) return redirect("/signup/admin?err=Not+authorized");
+
+  const form = await request.formData();
+  const idRaw = textOrUndefined(form.get("id"));
+  const id = Number(idRaw);
+  if (!idRaw || !Number.isFinite(id) || id <= 0) return redirect("/signup/admin?err=Invalid+signup+id");
+
+  const result = await env.DB.prepare(`DELETE FROM net_signups WHERE id = ?1`).bind(id).run();
+  const changed = (result as any)?.meta?.changes ?? 0;
+  if (!changed) return redirect("/signup/admin?err=Signup+not+found");
+
+  return redirect("/signup/admin?ok=Registration+deleted");
+}
+
 
 
 async function handleView(env: Env) {
@@ -723,6 +842,10 @@ export default Sentry.withSentry(
         if (pathname === "/signup" && request.method === "GET") return handleSignupGET(request, env);
         if (pathname === "/signup/new" && request.method === "GET") return handleSignupNewGET(request, env);
         if (pathname === "/signup/new" && request.method === "POST") return handleSignupNewPOST(request, env);
+        if (pathname === "/signup/admin" && request.method === "GET") return handleSignupAdminGET(request, env);
+        if (pathname === "/signup/admin/login" && request.method === "POST") return handleSignupAdminLoginPOST(request, env);
+        if (pathname === "/signup/admin/logout" && request.method === "POST") return handleSignupAdminLogoutPOST();
+        if (pathname === "/signup/admin/delete" && request.method === "POST") return handleSignupAdminDeletePOST(request, env);
 
         if (pathname === "/view" && request.method === "GET") return handleView(env);
 
