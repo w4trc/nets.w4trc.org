@@ -138,15 +138,6 @@ const RECURRING_OVERRIDES: RecurringOverrideRule[] = [
     nth: 2,
     weekday: 0, // Sunday
   },
-  {
-    label: "Kevin Morrell third Sunday",
-    role: "primary",
-    operator_name: "Kevin Morrell",
-    operator_callsign: "KM4DCK",
-    type: "nth_weekday_of_month",
-    nth: 3,
-    weekday: 0, // Sunday
-  },
 ];
 
 function isValidNetDate(v: string) {
