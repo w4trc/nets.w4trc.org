@@ -759,11 +759,29 @@ async function handleSignupAdminDeletePOST(request: Request, env: Env) {
 
 
 
-async function handleView(env: Env) {
-  const { results } = await env.DB.prepare(
-    `SELECT id, net_date, net_control_callsign, net_control_name, check_ins_count
-     FROM nets ORDER BY net_date DESC, id DESC LIMIT 2000`
-  ).all();
+async function handleView(env: Env, request: Request) {
+  const url = new URL(request.url);
+  const requestedLimit = Number(url.searchParams.get("limit") ?? "300");
+  const limit = Number.isFinite(requestedLimit) ? Math.max(50, Math.min(Math.floor(requestedLimit), 500)) : 300;
+
+  let results: unknown[] = [];
+  let partialNotice = "";
+  try {
+    const q = await env.DB.prepare(
+      `SELECT id, net_date, net_control_callsign, net_control_name, check_ins_count
+       FROM nets ORDER BY net_date DESC, id DESC LIMIT ?1`
+    ).bind(limit).all();
+    results = q.results ?? [];
+  } catch (err) {
+    // D1 can occasionally time out on larger reads under load; retry with a smaller page.
+    const q = await env.DB.prepare(
+      `SELECT id, net_date, net_control_callsign, net_control_name, check_ins_count
+       FROM nets ORDER BY net_date DESC, id DESC LIMIT 100`
+    ).all();
+    results = q.results ?? [];
+    partialNotice = `<div class="err"><strong>Partial results shown.</strong> D1 timed out on the full query, so only the latest 100 rows are displayed.</div>`;
+    Sentry.captureException(err);
+  }
 
   const rows = (results ?? []).map((r: any) => `
     <tr>
@@ -777,6 +795,7 @@ async function handleView(env: Env) {
     <div class="card">
       <h1>W4TRC Nets — History</h1>
       <p class="muted">Click a date to view full details. Comments are visible on detail pages only (requires passcode once per session).</p>
+      ${partialNotice}
       <table>
         <thead><tr><th>Date</th><th>Control (Call)</th><th>Control (Name)</th><th># Check-ins</th></tr></thead>
         <tbody>${rows || `<tr><td colspan="4">No records yet.</td></tr>`}</tbody>
@@ -965,7 +984,7 @@ export default Sentry.withSentry(
         if (pathname === "/signup/admin/logout" && request.method === "POST") return handleSignupAdminLogoutPOST();
         if (pathname === "/signup/admin/delete" && request.method === "POST") return handleSignupAdminDeletePOST(request, env);
 
-        if (pathname === "/view" && request.method === "GET") return handleView(env);
+        if (pathname === "/view" && request.method === "GET") return handleView(env, request);
 
         // Per-net detail: /net/:id (GET to prompt/login or show; POST to authenticate)
         if (pathname.startsWith("/net/")) {
