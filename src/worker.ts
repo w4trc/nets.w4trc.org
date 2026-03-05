@@ -8,6 +8,7 @@ export interface Env {
   MAIL_FROM: string;      // e.g., "W4TRC Nets <no-reply@w4trc.org>"
   MAIL_FROM_NAME: string; // (not used by Resend; kept for compatibility)
   DISTRO?: string;        // comma-separated, static in wrangler.jsonc "vars"
+  SIGNUP_NOTIFY_TOKEN?: string; // shared secret for cron-triggered signup summary emails
   RESEND_API_KEY: string; // secret
   TURNSTILE_SITE_KEY: string;   // public site key
   TURNSTILE_SECRET_KEY: string; // private secret key
@@ -309,6 +310,119 @@ async function sendMail(env: Env, subject: string, htmlBody: string) {
   return { ok: r.ok, status: r.status, statusText: r.statusText };
 }
 
+async function loadSignupAssignmentsForDates(env: Env, dates: string[]) {
+  const map = new Map<string, SlotAssignment>();
+  if (!dates.length) return map;
+
+  const placeholders = dates.map((_, i) => `?${i + 1}`).join(", ");
+  const { results } = await env.DB.prepare(
+    `SELECT net_date, role, operator_name, operator_callsign
+     FROM net_signups
+     WHERE net_date IN (${placeholders})
+     ORDER BY net_date ASC, role ASC, id DESC`
+  ).bind(...dates).all();
+
+  for (const r of results ?? []) {
+    const row = r as Pick<NetSignupRecord, "net_date" | "role" | "operator_name" | "operator_callsign">;
+    const key = `${row.net_date}:${row.role}`;
+    // Keep only the first row per slot from id DESC ordering.
+    if (map.has(key)) continue;
+    map.set(key, {
+      operator_name: row.operator_name,
+      operator_callsign: row.operator_callsign,
+      source: "signup",
+    });
+  }
+
+  return map;
+}
+
+function isSignupNotifyAuthorized(request: Request, env: Env) {
+  const expected = env.SIGNUP_NOTIFY_TOKEN;
+  if (!expected) return false;
+
+  const auth = request.headers.get("authorization") ?? "";
+  if (auth.startsWith("Bearer ")) {
+    const token = auth.slice("Bearer ".length).trim();
+    if (token === expected) return true;
+  }
+
+  const url = new URL(request.url);
+  const key = url.searchParams.get("key");
+  return key === expected;
+}
+
+async function handleSignupNotifyUpcoming(request: Request, env: Env) {
+  if (!env.SIGNUP_NOTIFY_TOKEN) {
+    return new Response("Missing SIGNUP_NOTIFY_TOKEN", { status: 500 });
+  }
+  if (!isSignupNotifyAuthorized(request, env)) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
+  const weekday = await inferNetWeekday(env);
+  const upcomingDates = buildScheduleDates(weekday, new Date(), 28, 2);
+  const byDateAndRole = await loadSignupAssignmentsForDates(env, upcomingDates);
+
+  const scheduleRows = upcomingDates.map((netDate) => {
+    const primary = resolveRecurringOverride(netDate, "primary", weekday) ?? byDateAndRole.get(`${netDate}:primary`);
+    const backup = resolveRecurringOverride(netDate, "backup", weekday) ?? byDateAndRole.get(`${netDate}:backup`);
+    return { netDate, primary, backup };
+  });
+
+  const titleSpan =
+    scheduleRows.length === 0
+      ? "No upcoming nets found"
+      : scheduleRows.length === 1
+        ? formatDateDisplay(scheduleRows[0].netDate)
+        : `${formatDateDisplay(scheduleRows[0].netDate)} and ${formatDateDisplay(scheduleRows[scheduleRows.length - 1].netDate)}`;
+
+  const subject = `W4TRC Net Coordinators (Next 2 Weeks): ${titleSpan}`;
+  const rowsHtml = scheduleRows
+    .map(({ netDate, primary, backup }) => `
+      <tr>
+        <td style="padding:8px;border:1px solid #ddd;">${escapeHtml(formatDateDisplay(netDate))}</td>
+        <td style="padding:8px;border:1px solid #ddd;">${primary ? `${escapeHtml(primary.operator_callsign)} (${escapeHtml(primary.operator_name)})` : `<em>Open</em>`}</td>
+        <td style="padding:8px;border:1px solid #ddd;">${backup ? `${escapeHtml(backup.operator_callsign)} (${escapeHtml(backup.operator_name)})` : `<em>Open</em>`}</td>
+      </tr>
+    `)
+    .join("");
+
+  const htmlBody = `
+    <h2>W4TRC Net Coordinators (Next 2 Weeks)</h2>
+    <p>Generated at ${escapeHtml(new Date().toISOString())}</p>
+    <table style="border-collapse:collapse;border:1px solid #ddd;">
+      <thead>
+        <tr>
+          <th style="padding:8px;border:1px solid #ddd;text-align:left;">Net Date</th>
+          <th style="padding:8px;border:1px solid #ddd;text-align:left;">Primary Controller</th>
+          <th style="padding:8px;border:1px solid #ddd;text-align:left;">Backup Controller</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rowsHtml || `<tr><td style="padding:8px;border:1px solid #ddd;" colspan="3">No upcoming net dates found.</td></tr>`}
+      </tbody>
+    </table>
+  `;
+
+  const mail = await sendMail(env, subject, htmlBody);
+  const payload = {
+    ok: !!mail.ok,
+    mail,
+    generated_at: new Date().toISOString(),
+    weeks: scheduleRows.map(({ netDate, primary, backup }) => ({
+      net_date: netDate,
+      primary: primary ? `${primary.operator_callsign} (${primary.operator_name})` : null,
+      backup: backup ? `${backup.operator_callsign} (${backup.operator_name})` : null,
+    })),
+  };
+
+  return new Response(JSON.stringify(payload, null, 2), {
+    status: mail.ok ? 200 : 502,
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
 /* ---------- Route handlers ---------- */
 async function handleHome() {
   return redirect('https://w4trc.org/nets', 301);
@@ -485,24 +599,7 @@ async function inferNetWeekday(env: Env) {
 async function handleSignupGET(request: Request, env: Env) {
   const weekday = await inferNetWeekday(env);
   const upcomingDates = buildScheduleDates(weekday, new Date(), 140, 20);
-  const placeholders = upcomingDates.map((_, i) => `?${i + 1}`).join(", ");
-
-  const { results } = await env.DB.prepare(
-    `SELECT net_date, role, operator_name, operator_email, operator_callsign
-     FROM net_signups
-     WHERE net_date IN (${placeholders})
-     ORDER BY net_date ASC`
-  ).bind(...upcomingDates).all();
-
-  const byDateAndRole = new Map<string, SlotAssignment>();
-  for (const r of results ?? []) {
-    const row = r as NetSignupRecord;
-    byDateAndRole.set(`${row.net_date}:${row.role}`, {
-      operator_name: row.operator_name,
-      operator_callsign: row.operator_callsign,
-      source: "signup",
-    });
-  }
+  const byDateAndRole = await loadSignupAssignmentsForDates(env, upcomingDates);
 
   const url = new URL(request.url);
   const ok = textOrUndefined(url.searchParams.get("ok"));
@@ -970,6 +1067,9 @@ export default Sentry.withSentry(
         if (pathname === "/signup" && request.method === "GET") return handleSignupGET(request, env);
         if (pathname === "/signup/new" && request.method === "GET") return handleSignupNewGET(request, env);
         if (pathname === "/signup/new" && request.method === "POST") return handleSignupNewPOST(request, env);
+        if (pathname === "/signup/notify/upcoming" && (request.method === "GET" || request.method === "POST")) {
+          return handleSignupNotifyUpcoming(request, env);
+        }
         if (pathname === "/signup/admin" && request.method === "GET") return handleSignupAdminGET(request, env);
         if (pathname === "/signup/admin/login" && request.method === "POST") return handleSignupAdminLoginPOST(request, env);
         if (pathname === "/signup/admin/logout" && request.method === "POST") return handleSignupAdminLogoutPOST();
