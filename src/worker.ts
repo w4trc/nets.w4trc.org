@@ -129,6 +129,11 @@ type RecurringOverrideRule = {
   nth?: number; // 1..5
 };
 
+// Dates to hide from the signup schedule (ISO format YYYY-MM-DD)
+const SKIPPED_DATES: string[] = [
+  "2026-03-08", // net cancelled this week
+];
+
 const RECURRING_OVERRIDES: RecurringOverrideRule[] = [
   {
     label: "George DeVault second Sunday",
@@ -233,6 +238,8 @@ function buildScheduleDates(defaultWeekday: number, fromDate: Date, horizonDays:
     d.setUTCDate(start.getUTCDate() + i);
     const iso = toIsoDateUTC(d);
     const weekday = d.getUTCDay();
+    if (SKIPPED_DATES.includes(iso)) continue;
+
     if (weekday === defaultWeekday) set.add(iso);
 
     for (const rule of RECURRING_OVERRIDES) {
