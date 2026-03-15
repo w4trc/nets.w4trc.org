@@ -1023,6 +1023,31 @@ async function handleApiStats(env: Env) {
   });
 }
 
+async function handleApiNetControls(env: Env, request: Request) {
+  const url = new URL(request.url);
+  const limit = Math.min(Math.max(1, Number(url.searchParams.get('limit') ?? '20')), 52);
+  const fromParam = url.searchParams.get('from');
+  const fromDate = fromParam && isValidNetDate(fromParam) ? parseIsoDateUTC(fromParam) : new Date();
+
+  const weekday = await inferNetWeekday(env);
+  const dates = buildScheduleDates(weekday, fromDate, 365, limit);
+  const byDateAndRole = await loadSignupAssignmentsForDates(env, dates);
+
+  const controls = dates.map((netDate) => {
+    const primary = resolveRecurringOverride(netDate, "primary", weekday) ?? byDateAndRole.get(`${netDate}:primary`) ?? null;
+    const backup  = resolveRecurringOverride(netDate, "backup",  weekday) ?? byDateAndRole.get(`${netDate}:backup`)  ?? null;
+    return { net_date: netDate, date_display: formatDateDisplay(netDate), primary, backup };
+  });
+
+  return new Response(JSON.stringify({ generated_at: new Date().toISOString(), controls }), {
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'access-control-allow-origin': '*',
+    },
+  });
+}
+
 async function handleApiNets(env: Env, request: Request) {
   const url = new URL(request.url);
   const limit = Math.min(Number(url.searchParams.get('limit') ?? '500'), 2000);
@@ -1096,6 +1121,7 @@ export default Sentry.withSentry(
 
         if (pathname === "/api/stats" && request.method === "GET") return handleApiStats(env);
         if (pathname === "/api/nets" && request.method === "GET") return handleApiNets(env, request);
+        if (pathname === "/api/net-controls" && request.method === "GET") return handleApiNetControls(env, request);
 
         // CORS preflight for /api/*
         if (pathname.startsWith("/api/") && request.method === "OPTIONS") {
