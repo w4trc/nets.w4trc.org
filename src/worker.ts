@@ -1056,7 +1056,7 @@ async function handleApiUpcoming(env: Env) {
   const backup = resolveRecurringOverride(netDate, "backup", weekday) ?? byDateAndRole.get(`${netDate}:backup`) ?? null;
 
   const fmt = (a: SlotAssignment | null) => a ? `${a.operator_name} - ${a.operator_callsign}` : "Nobody";
-  const body = `${netDate}\n${fmt(primary)}\n${fmt(backup)}`;
+  const body = `${netDate}\nPrimary: ${fmt(primary)}\nBackup: ${fmt(backup)}`;
 
   return new Response(body, {
     headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }
