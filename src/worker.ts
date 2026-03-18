@@ -1040,6 +1040,33 @@ async function handleApiNets(env: Env, request: Request) {
   });
 }
 
+async function handleApiUpcoming(env: Env) {
+  const weekday = await inferNetWeekday(env);
+  const dates = buildScheduleDates(weekday, new Date(), 14, 1);
+  const netDate = dates[0] ?? null;
+
+  if (!netDate) {
+    return new Response(JSON.stringify({ net_date: null, primary: null, backup: null, generated_at: new Date().toISOString() }), {
+      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }
+    });
+  }
+
+  const byDateAndRole = await loadSignupAssignmentsForDates(env, [netDate]);
+  const primary = resolveRecurringOverride(netDate, "primary", weekday) ?? byDateAndRole.get(`${netDate}:primary`) ?? null;
+  const backup = resolveRecurringOverride(netDate, "backup", weekday) ?? byDateAndRole.get(`${netDate}:backup`) ?? null;
+
+  const payload = {
+    net_date: netDate,
+    primary: primary ? { operator_name: primary.operator_name, operator_callsign: primary.operator_callsign, source: primary.source } : null,
+    backup: backup ? { operator_name: backup.operator_name, operator_callsign: backup.operator_callsign, source: backup.source } : null,
+    generated_at: new Date().toISOString(),
+  };
+
+  return new Response(JSON.stringify(payload), {
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }
+  });
+}
+
 function round2(n: any) {
   const x = Number(n);
   return Number.isFinite(x) ? Math.round(x * 100)/100 : null;
@@ -1096,6 +1123,7 @@ export default Sentry.withSentry(
 
         if (pathname === "/api/stats" && request.method === "GET") return handleApiStats(env);
         if (pathname === "/api/nets" && request.method === "GET") return handleApiNets(env, request);
+        if (pathname === "/api/upcoming" && request.method === "GET") return handleApiUpcoming(env);
 
         // CORS preflight for /api/*
         if (pathname.startsWith("/api/") && request.method === "OPTIONS") {
