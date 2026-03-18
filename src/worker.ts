@@ -1046,8 +1046,8 @@ async function handleApiUpcoming(env: Env) {
   const netDate = dates[0] ?? null;
 
   if (!netDate) {
-    return new Response(JSON.stringify({ net_date: null, primary: null, backup: null, generated_at: new Date().toISOString() }), {
-      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }
+    return new Response("No upcoming net\nNobody\nNobody", {
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }
     });
   }
 
@@ -1055,16 +1055,11 @@ async function handleApiUpcoming(env: Env) {
   const primary = resolveRecurringOverride(netDate, "primary", weekday) ?? byDateAndRole.get(`${netDate}:primary`) ?? null;
   const backup = resolveRecurringOverride(netDate, "backup", weekday) ?? byDateAndRole.get(`${netDate}:backup`) ?? null;
 
-  const nobody = { operator_name: "Nobody", operator_callsign: "Nobody", source: null };
-  const payload = {
-    net_date: netDate,
-    primary: primary ? { operator_name: primary.operator_name, operator_callsign: primary.operator_callsign, source: primary.source } : nobody,
-    backup: backup ? { operator_name: backup.operator_name, operator_callsign: backup.operator_callsign, source: backup.source } : nobody,
-    generated_at: new Date().toISOString(),
-  };
+  const fmt = (a: SlotAssignment | null) => a ? `${a.operator_name} - ${a.operator_callsign}` : "Nobody";
+  const body = `${netDate}\n${fmt(primary)}\n${fmt(backup)}`;
 
-  return new Response(JSON.stringify(payload), {
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }
+  return new Response(body, {
+    headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }
   });
 }
 
